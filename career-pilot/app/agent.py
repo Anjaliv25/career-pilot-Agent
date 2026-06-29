@@ -132,7 +132,7 @@ def security_checkpoint(ctx: Context, node_input: Any):
     
     scrubbed_query = re.sub(email_regex, "[REDACTED_EMAIL]", query)
     scrubbed_query = re.sub(phone_regex, "[REDACTED_PHONE]", scrubbed_query)
-    ctx.state.user_query = scrubbed_query
+    ctx.state["user_query"] = scrubbed_query
     
     # 2. Prompt Injection Detection (Keyword detection)
     injection_keywords = ["ignore previous instructions", "system prompt", "dan mode", "you are now a", "override safety"]
@@ -141,6 +141,9 @@ def security_checkpoint(ctx: Context, node_input: Any):
     # 3. Domain-specific rule (Check for fraudulent/harmful job applications)
     banned_roles = ["hacker", "scammer", "bank robber", "drug dealer", "assassin"]
     has_banned_role = any(role in query.lower() for role in banned_roles)
+    
+    # Initialize audit logs list if not present
+    audit_logs = ctx.state.get("audit_logs") or []
     
     if has_injection or has_banned_role:
         severity = "CRITICAL"
@@ -152,11 +155,12 @@ def security_checkpoint(ctx: Context, node_input: Any):
             "reason": reason,
             "input_preview": query[:50]
         }
-        ctx.state.security_violation = True
-        ctx.state.security_message = f"Access Denied: {reason}."
-        ctx.state.audit_logs.append(json.dumps(audit_entry))
+        ctx.state["security_violation"] = True
+        ctx.state["security_message"] = f"Access Denied: {reason}."
+        audit_logs.append(json.dumps(audit_entry))
+        ctx.state["audit_logs"] = audit_logs
         ctx.route = "security_event"
-        return ctx.state.security_message
+        return ctx.state["security_message"]
     else:
         severity = "INFO"
         audit_entry = {
@@ -165,24 +169,26 @@ def security_checkpoint(ctx: Context, node_input: Any):
             "severity": severity,
             "input_preview": scrubbed_query[:50]
         }
-        ctx.state.audit_logs.append(json.dumps(audit_entry))
+        audit_logs.append(json.dumps(audit_entry))
+        ctx.state["audit_logs"] = audit_logs
         ctx.route = "safe"
         return scrubbed_query
 
-@node
+
+@node(rerun_on_resume=True)
 async def orchestrator_node(ctx: Context, node_input: Any):
     result = await ctx.run_node(orchestrator_agent, node_input=node_input)
     
     # Check if a cover letter draft was generated
     if "cover letter" in result.lower() or "dear hiring manager" in result.lower():
-        ctx.state.draft_cover_letter = result
+        ctx.state["draft_cover_letter"] = result
         ctx.route = "needs_approval"
     else:
         ctx.route = "direct"
         
     return result
 
-@node
+@node(rerun_on_resume=True)
 async def human_approval(ctx: Context, node_input: Any):
     interrupt_id = "user_approval"
     response = ctx.resume_inputs.get(interrupt_id)
@@ -190,16 +196,16 @@ async def human_approval(ctx: Context, node_input: Any):
     if response is not None:
         user_input = response.get("result", "")
         if "approve" in user_input.lower() or "yes" in user_input.lower():
-            ctx.state.approved = True
+            ctx.state["approved"] = True
             ctx.route = "direct"
-            return f"Cover letter approved and finalized!\n\n{ctx.state.draft_cover_letter}"
+            return f"Cover letter approved and finalized!\n\n{ctx.state.get('draft_cover_letter')}"
         else:
-            ctx.state.approved = False
+            ctx.state["approved"] = False
             # Re-run orchestrator with user's feedback
             feedback = f"User requested changes to the cover letter draft: '{user_input}'. Please revise the cover letter."
             result = await ctx.run_node(orchestrator_agent, node_input=feedback)
             if "cover letter" in result.lower() or "dear hiring manager" in result.lower():
-                ctx.state.draft_cover_letter = result
+                ctx.state["draft_cover_letter"] = result
                 ctx.route = "needs_approval"
                 return result
             else:
@@ -208,12 +214,12 @@ async def human_approval(ctx: Context, node_input: Any):
     else:
         return RequestInput(
             interrupt_id=interrupt_id,
-            message=f"Please review the cover letter draft below. Type 'approve' to finalize or describe changes:\n\n{ctx.state.draft_cover_letter}"
+            message=f"Please review the cover letter draft below. Type 'approve' to finalize or describe changes:\n\n{ctx.state.get('draft_cover_letter')}"
         )
 
 @node
 def security_event_node(ctx: Context, node_input: Any):
-    return ctx.state.security_message
+    return ctx.state.get("security_message")
 
 @node
 def final_output_node(ctx: Context, node_input: Any):
